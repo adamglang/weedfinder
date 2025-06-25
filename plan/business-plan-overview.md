@@ -62,11 +62,11 @@ WeedFinder.ai is an AI-powered cannabis product discovery platform that solves t
 ---
 
 *This overview connects to detailed implementation plans in the following documents:*
-- [Technical Architecture](technical-architecture.md)
-- [Phase 1: POC Implementation](phase-1-poc.md)
-- [Phase 2: MVP Development](phase-2-mvp.md)
-- [Phase 3: Growth Strategy](phase-3-growth.md)
-- [Phase 4: Data Monetization](phase-4-data-platform.md)
-- [Phase 5: Acquisition Preparation](phase-5-acquisition.md)
-- [Financial Projections](financial-projections.md)
-- [Competitive Analysis](competitive-analysis.md)
+- [Technical Architecture](technical/technical-architecture.md)
+- [Phase 1: POC Implementation](technical/phase-1-poc.md)
+- [Phase 2: MVP Development](technical/phase-2-mvp.md)
+- [Phase 3: Growth Strategy](technical/phase-3-growth.md)
+- [Phase 4: Data Monetization](technical/phase-4-data-platform.md)
+- [Phase 5: Acquisition Preparation](technical/phase-5-acquisition.md)
+- [Financial Projections](business/financial-projections.md)
+- [Competitive Analysis](business/competitive-analysis.md)
