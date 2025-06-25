@@ -410,41 +410,89 @@ class SearchService:
 
 **Implementation Plan:**
 
-#### **A. Cloud Infrastructure Setup**
-- **Platform:** AWS ECS with Fargate (cost-effective, scalable)
-- **Database:** AWS RDS PostgreSQL with pgvector
-- **Cache:** AWS ElastiCache Redis
-- **Load Balancer:** AWS ALB
+#### **A. Initial Deployment - Fly.io (Immediate)**
+- **Platform:** Fly.io for fast, simple deployment
+- **Database:** Fly.io Postgres with pgvector extension
+- **Cache:** Fly.io Redis
+- **Benefits:** Quick setup, cost-effective for POC/MVP stage
 
-#### **B. Deployment Configuration**
-- **File:** Create [`deploy/docker-compose.prod.yml`](../deploy/docker-compose.prod.yml)
-- **File:** Create [`deploy/aws-ecs-task-definition.json`](../deploy/aws-ecs-task-definition.json)
-- **File:** Create [`deploy/terraform/`](../deploy/terraform/) for infrastructure as code
+#### **B. Frontend Deployment - Vercel**
+- **Platform:** Vercel for static web widget hosting
+- **Benefits:** CDN, automatic deployments, great for React/Next.js
+- **Integration:** API calls to Fly.io backend
 
-#### **C. CI/CD Pipeline**
-- **File:** Create [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml)
-```yaml
-name: Deploy to AWS
-on:
-  push:
-    branches: [main]
+#### **C. Fly.io Configuration**
+- **File:** Create [`fly.toml`](../fly.toml)
+```toml
+app = "weedfinder-api"
+primary_region = "sea"
 
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v3
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v2
-      - name: Build and push Docker image
-        run: |
-          docker build -t weedfinder .
-          docker tag weedfinder:latest $ECR_REGISTRY/weedfinder:latest
-          docker push $ECR_REGISTRY/weedfinder:latest
-      - name: Deploy to ECS
-        run: |
-          aws ecs update-service --cluster weedfinder --service weedfinder-api
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8000"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8000
+  processes = ["app"]
+
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+    force_https = true
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+
+[deploy]
+  release_command = "python init_db.py"
 ```
+
+#### **D. Vercel Configuration**
+- **File:** Create [`vercel.json`](../weedfinder-client/vercel.json)
+```json
+{
+  "builds": [
+    {
+      "src": "index.html",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "https://weedfinder-api.fly.dev/$1"
+    }
+  ]
+}
+```
+
+#### **E. Deployment Commands**
+```bash
+# Deploy backend to Fly.io
+fly launch --no-deploy
+fly secrets set OPENAI_API_KEY=xxx POSABIT_API_TOKEN=xxx
+fly deploy
+
+# Deploy frontend to Vercel
+cd weedfinder-client
+vercel --prod
+```
+
+#### **F. Future AWS Migration Plan**
+- **Timeline:** After reaching 10+ dispensary customers
+- **Platform:** AWS ECS with Fargate for better enterprise features
+- **Database:** AWS RDS PostgreSQL with pgvector
+- **Benefits:** Better compliance, enterprise SLAs, advanced monitoring
 
 ---
 
