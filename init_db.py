@@ -13,7 +13,7 @@ load_dotenv()
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from src.database import init_database, insert_store
+from src.database.alembic_db import reset_database_with_sample_data
 import logging
 
 # Configure logging

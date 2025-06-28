@@ -15,10 +15,10 @@ load_dotenv()
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from src.posabit_adapter import POSaBITAdapter
-from src.search_service import SearchService
-from src.strain_classifier import StrainClassifier
-from src.database import get_db_connection
+from src.adapters import POSaBITAdapter
+from src.services import SearchService
+from src.ml import StrainClassifier
+from src.database.config import get_session
 import logging
 
 # Configure logging
@@ -29,11 +29,10 @@ async def test_database_connection():
     """Test database connectivity"""
     print("\n🔍 Testing database connection...")
     try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1")
-            result = cur.fetchone()
-        conn.close()
+        from sqlalchemy import text
+        with get_session() as session:
+            # Simple query to test connection
+            result = session.execute(text("SELECT 1")).fetchone()
         print("✅ Database connection successful")
         return True
     except Exception as e:

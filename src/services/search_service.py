@@ -6,7 +6,8 @@ import time
 import logging
 from typing import List, Dict, Optional
 import os
-from .database import log_search
+from .search_log_service import SearchLogService
+from ..database.config import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,7 @@ class SearchService:
     
     def __init__(self):
         self.openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.search_log_service = SearchLogService()
         
         # Initialize Redis for caching (optional)
         try:
@@ -193,9 +195,13 @@ The "name" field must be copied EXACTLY from the numbered list above. Do not mod
             if cached_result:
                 response_time = int((time.time() - start_time) * 1000)
                 
-                # Log search
+                # Log search using service
                 if store_id:
-                    log_search(store_id, query, {}, len(cached_result), response_time, cached=True)
+                    with get_session() as session:
+                        self.search_log_service.log_search(
+                            session, store_id, query, {}, len(cached_result), response_time, cached=True
+                        )
+                        session.commit()
                 
                 logger.info(f"Cache hit for query: {query[:50]}...")
                 return cached_result
@@ -209,9 +215,13 @@ The "name" field must be copied EXACTLY from the numbered list above. Do not mod
             # Calculate response time
             response_time = int((time.time() - start_time) * 1000)
             
-            # Log search
+            # Log search using service
             if store_id:
-                log_search(store_id, query, {}, len(results), response_time, cached=False)
+                with get_session() as session:
+                    self.search_log_service.log_search(
+                        session, store_id, query, {}, len(results), response_time, cached=False
+                    )
+                    session.commit()
             
             logger.info(f"Search completed: {query[:50]}... -> {len(results)} results in {response_time}ms")
             return results

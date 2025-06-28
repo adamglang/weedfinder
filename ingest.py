@@ -14,8 +14,8 @@ load_dotenv()
 # Add src to path
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-from src.posabit_adapter import POSaBITAdapter
-from src.strain_classifier import StrainClassifier
+from src.adapters import POSaBITAdapter
+from src.ml import StrainClassifier
 import logging
 
 # Configure logging

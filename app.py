@@ -1,10 +1,10 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import List, Dict, Optional
+from typing import List, Optional
 import os
-import json
+
 import logging
 import time
 from dotenv import load_dotenv
@@ -13,10 +13,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import our modules (we'll create these)
-from src.database import get_db_connection
-from src.posabit_adapter import POSaBITAdapter
-from src.search_service import SearchService
-from src.roi_tracker import ROITracker
+from src.database.config import get_session
+from src.adapters import POSaBITAdapter
+from src.services import SearchService
+from src.analytics import ROITracker
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -190,7 +190,6 @@ async def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    import time
     
     uvicorn.run(
         "app:app",

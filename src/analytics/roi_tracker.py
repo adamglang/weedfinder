@@ -1,12 +1,13 @@
 import pandas as pd
 import logging
-from typing import Dict, Optional
+from typing import Dict
 from datetime import datetime, timedelta
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import os
-from .database import get_db_cursor, get_store_by_slug
+from ..services import StoreService, SalesBaselineService, SalesCurrentService, StoreMetricsService
+from ..database.config import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -18,100 +19,90 @@ class ROITracker:
         self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
         self.smtp_user = os.getenv("SMTP_USER")
         self.smtp_password = os.getenv("SMTP_PASSWORD")
+        self.store_service = StoreService()
+        self.sales_baseline_service = SalesBaselineService()
+        self.sales_current_service = SalesCurrentService()
+        self.store_metrics_service = StoreMetricsService()
     
     async def import_baseline(self, store_slug: str, csv_data: Dict) -> float:
         """Import baseline sales data from CSV"""
-        try:
-            store = get_store_by_slug(store_slug)
-            if not store:
-                raise ValueError(f"Store not found: {store_slug}")
-            
-            store_id = store['id']
-            
-            # If csv_data contains file path, read it
-            if 'file_path' in csv_data:
-                df = pd.read_csv(csv_data['file_path'])
-            elif 'data' in csv_data:
-                # Direct data provided
-                df = pd.DataFrame(csv_data['data'])
-            else:
-                raise ValueError("No valid CSV data provided")
-            
-            # Ensure required columns exist
-            required_cols = ['closed_at', 'subtotal']
-            missing_cols = [col for col in required_cols if col not in df.columns]
-            if missing_cols:
-                raise ValueError(f"Missing required columns: {missing_cols}")
-            
-            # Convert closed_at to datetime
-            df['closed_at'] = pd.to_datetime(df['closed_at'])
-            
-            # Filter to last 30 days for baseline (14 days before widget activation)
-            cutoff_date = datetime.now() - timedelta(days=14)
-            baseline_df = df[df['closed_at'] < cutoff_date]
-            
-            # Store baseline data
-            with get_db_cursor() as cur:
+        with get_session() as session:
+            try:
+                store = self.store_service.get_by_slug(session, store_slug)
+                if not store:
+                    raise ValueError(f"Store not found: {store_slug}")
+                
+                store_id = store.id
+                
+                # If csv_data contains file path, read it
+                if 'file_path' in csv_data:
+                    df = pd.read_csv(csv_data['file_path'])
+                elif 'data' in csv_data:
+                    # Direct data provided
+                    df = pd.DataFrame(csv_data['data'])
+                else:
+                    raise ValueError("No valid CSV data provided")
+                
+                # Ensure required columns exist
+                required_cols = ['closed_at', 'subtotal']
+                missing_cols = [col for col in required_cols if col not in df.columns]
+                if missing_cols:
+                    raise ValueError(f"Missing required columns: {missing_cols}")
+                
+                # Convert closed_at to datetime
+                df['closed_at'] = pd.to_datetime(df['closed_at'])
+                
+                # Filter to last 30 days for baseline (14 days before widget activation)
+                cutoff_date = datetime.now() - timedelta(days=14)
+                baseline_df = df[df['closed_at'] < cutoff_date]
+                
                 # Clear existing baseline for this store
-                cur.execute("DELETE FROM sales_baseline WHERE store_id = %s", (store_id,))
+                self.sales_baseline_service.clear_store_baseline(session, store_id)
                 
                 # Insert baseline records
                 for _, row in baseline_df.iterrows():
-                    cur.execute("""
-                        INSERT INTO sales_baseline (store_id, ticket_id, subtotal, closed_at)
-                        VALUES (%s, %s, %s, %s)
-                    """, (
-                        store_id,
-                        row.get('ticket_id', f"baseline_{row.name}"),
-                        float(row['subtotal']),
-                        row['closed_at']
-                    ))
+                    baseline_data = {
+                        'store_id': store_id,
+                        'ticket_id': row.get('ticket_id', f"baseline_{row.name}"),
+                        'subtotal': float(row['subtotal']),
+                        'closed_at': row['closed_at']
+                    }
+                    self.sales_baseline_service.create(session, obj_in=baseline_data)
                 
                 # Calculate baseline AOV
                 baseline_aov = baseline_df['subtotal'].mean()
                 
+                session.commit()
                 logger.info(f"Imported {len(baseline_df)} baseline records for {store_slug}, AOV: ${baseline_aov:.2f}")
                 return baseline_aov
                 
-        except Exception as e:
-            logger.error(f"Error importing baseline for {store_slug}: {e}")
-            raise
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error importing baseline for {store_slug}: {e}")
+                raise
     
     async def calculate_metrics(self, store_slug: str) -> Dict:
         """Calculate current ROI metrics for a store"""
-        try:
-            store = get_store_by_slug(store_slug)
-            if not store:
-                raise ValueError(f"Store not found: {store_slug}")
-            
-            store_id = store['id']
-            
-            with get_db_cursor() as cur:
-                # Get baseline AOV
-                cur.execute("""
-                    SELECT AVG(subtotal) as baseline_aov, COUNT(*) as baseline_count
-                    FROM sales_baseline 
-                    WHERE store_id = %s
-                """, (store_id,))
+        with get_session() as session:
+            try:
+                store = self.store_service.get_by_slug(session, store_slug)
+                if not store:
+                    raise ValueError(f"Store not found: {store_slug}")
                 
-                baseline_result = cur.fetchone()
-                baseline_aov = float(baseline_result['baseline_aov'] or 0)
-                baseline_count = baseline_result['baseline_count']
+                store_id = store.id
+                
+                # Get baseline stats
+                baseline_stats = self.sales_baseline_service.get_baseline_stats(session, store_id)
+                baseline_aov = baseline_stats['baseline_aov']
+                baseline_count = baseline_stats['baseline_count']
                 
                 if baseline_count == 0:
                     raise ValueError("No baseline data found. Please import baseline sales first.")
                 
-                # Get current 7-day AOV
-                cur.execute("""
-                    SELECT AVG(subtotal) as current_aov, COUNT(*) as current_count
-                    FROM sales_current 
-                    WHERE store_id = %s 
-                    AND closed_at >= NOW() - INTERVAL '7 days'
-                """, (store_id,))
-                
-                current_result = cur.fetchone()
-                current_aov = float(current_result['current_aov'] or baseline_aov)
-                current_count = current_result['current_count']
+                # Get current 7-day stats
+                current_stats = self.sales_current_service.get_current_stats(session, store_id, days=7)
+                current_aov = current_stats['current_aov'] or baseline_aov
+                current_count = current_stats['current_count']
                 
                 # Calculate lift metrics
                 lift_abs = current_aov - baseline_aov
@@ -132,23 +123,19 @@ class ROITracker:
                 }
                 
                 # Store metrics in database
-                cur.execute("""
-                    INSERT INTO store_metrics (store_id, date, baseline_aov, current_aov, lift_abs, lift_pct)
-                    VALUES (%s, CURRENT_DATE, %s, %s, %s, %s)
-                    ON CONFLICT (store_id, date) 
-                    DO UPDATE SET
-                        baseline_aov = EXCLUDED.baseline_aov,
-                        current_aov = EXCLUDED.current_aov,
-                        lift_abs = EXCLUDED.lift_abs,
-                        lift_pct = EXCLUDED.lift_pct
-                """, (store_id, baseline_aov, current_aov, lift_abs, lift_pct))
+                from datetime import date
+                self.store_metrics_service.upsert_daily_metrics(
+                    session, store_id, date.today(), baseline_aov, current_aov, lift_abs, lift_pct
+                )
                 
+                session.commit()
                 logger.info(f"Calculated metrics for {store_slug}: {lift_pct:.1f}% lift, ${weekly_impact:.2f} weekly impact")
                 return metrics
                 
-        except Exception as e:
-            logger.error(f"Error calculating metrics for {store_slug}: {e}")
-            raise
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error calculating metrics for {store_slug}: {e}")
+                raise
     
     def generate_weekly_report_html(self, store_name: str, metrics: Dict) -> str:
         """Generate HTML email report"""
@@ -218,90 +205,92 @@ class ROITracker:
     
     async def send_weekly_report(self, store_slug: str, recipient_email: str) -> bool:
         """Send weekly ROI report via email"""
-        try:
-            store = get_store_by_slug(store_slug)
-            if not store:
-                raise ValueError(f"Store not found: {store_slug}")
-            
-            # Calculate current metrics
-            metrics = await self.calculate_metrics(store_slug)
-            
-            # Generate email content
-            subject = f"WeedFinder Weekly Impact: ${'+' if metrics['weekly_impact'] > 0 else ''}{metrics['weekly_impact']:.0f}"
-            html_body = self.generate_weekly_report_html(store['name'], metrics)
-            
-            # Create email message
-            msg = MIMEMultipart('alternative')
-            msg['Subject'] = subject
-            msg['From'] = f"WeedFinder Reports <{self.smtp_user}>"
-            msg['To'] = recipient_email
-            
-            # Add HTML content
-            html_part = MIMEText(html_body, 'html')
-            msg.attach(html_part)
-            
-            # Send email
-            if self.smtp_user and self.smtp_password:
-                with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
-                    server.starttls()
-                    server.login(self.smtp_user, self.smtp_password)
-                    server.send_message(msg)
+        with get_session() as session:
+            try:
+                store = self.store_service.get_by_slug(session, store_slug)
+                if not store:
+                    raise ValueError(f"Store not found: {store_slug}")
                 
-                logger.info(f"Weekly report sent to {recipient_email} for {store_slug}")
-                return True
-            else:
-                logger.warning("SMTP credentials not configured, email not sent")
-                # In development, just log the email content
-                logger.info(f"Would send email to {recipient_email}:\n{subject}\n{html_body}")
+                # Calculate current metrics
+                metrics = await self.calculate_metrics(store_slug)
+                
+                # Generate email content
+                subject = f"WeedFinder Weekly Impact: ${'+' if metrics['weekly_impact'] > 0 else ''}{metrics['weekly_impact']:.0f}"
+                html_body = self.generate_weekly_report_html(store.name, metrics)
+                
+                # Create email message
+                msg = MIMEMultipart('alternative')
+                msg['Subject'] = subject
+                msg['From'] = f"WeedFinder Reports <{self.smtp_user}>"
+                msg['To'] = recipient_email
+                
+                # Add HTML content
+                html_part = MIMEText(html_body, 'html')
+                msg.attach(html_part)
+                
+                # Send email
+                if self.smtp_user and self.smtp_password:
+                    with smtplib.SMTP(self.smtp_host, self.smtp_port) as server:
+                        server.starttls()
+                        server.login(self.smtp_user, self.smtp_password)
+                        server.send_message(msg)
+                    
+                    logger.info(f"Weekly report sent to {recipient_email} for {store_slug}")
+                    return True
+                else:
+                    logger.warning("SMTP credentials not configured, email not sent")
+                    # In development, just log the email content
+                    logger.info(f"Would send email to {recipient_email}:\n{subject}\n{html_body}")
+                    return False
+                    
+            except Exception as e:
+                logger.error(f"Error sending weekly report for {store_slug}: {e}")
                 return False
-                
-        except Exception as e:
-            logger.error(f"Error sending weekly report for {store_slug}: {e}")
-            return False
     
     async def import_current_sales(self, store_slug: str, csv_data: Dict) -> int:
         """Import current sales data for ROI calculation"""
-        try:
-            store = get_store_by_slug(store_slug)
-            if not store:
-                raise ValueError(f"Store not found: {store_slug}")
-            
-            store_id = store['id']
-            
-            # Process CSV data
-            if 'file_path' in csv_data:
-                df = pd.read_csv(csv_data['file_path'])
-            elif 'data' in csv_data:
-                df = pd.DataFrame(csv_data['data'])
-            else:
-                raise ValueError("No valid CSV data provided")
-            
-            # Convert closed_at to datetime
-            df['closed_at'] = pd.to_datetime(df['closed_at'])
-            
-            # Store current sales data
-            with get_db_cursor() as cur:
+        with get_session() as session:
+            try:
+                store = self.store_service.get_by_slug(session, store_slug)
+                if not store:
+                    raise ValueError(f"Store not found: {store_slug}")
+                
+                store_id = store.id
+                
+                # Process CSV data
+                if 'file_path' in csv_data:
+                    df = pd.read_csv(csv_data['file_path'])
+                elif 'data' in csv_data:
+                    df = pd.DataFrame(csv_data['data'])
+                else:
+                    raise ValueError("No valid CSV data provided")
+                
+                # Convert closed_at to datetime
+                df['closed_at'] = pd.to_datetime(df['closed_at'])
+                
+                # Store current sales data
                 count = 0
                 for _, row in df.iterrows():
-                    cur.execute("""
-                        INSERT INTO sales_current (store_id, ticket_id, subtotal, item_notes, closed_at)
-                        VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT DO NOTHING
-                    """, (
-                        store_id,
-                        row.get('ticket_id', f"current_{row.name}"),
-                        float(row['subtotal']),
-                        row.get('item_notes', ''),
-                        row['closed_at']
-                    ))
+                    sale_data = {
+                        'store_id': store_id,
+                        'ticket_id': row.get('ticket_id', f"current_{row.name}"),
+                        'subtotal': float(row['subtotal']),
+                        'item_notes': row.get('item_notes', ''),
+                        'closed_at': row['closed_at']
+                    }
+                    
+                    # Use upsert to avoid duplicates
+                    self.sales_current_service.upsert_sale(session, sale_data)
                     count += 1
                 
+                session.commit()
                 logger.info(f"Imported {count} current sales records for {store_slug}")
                 return count
                 
-        except Exception as e:
-            logger.error(f"Error importing current sales for {store_slug}: {e}")
-            raise
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error importing current sales for {store_slug}: {e}")
+                raise
 
 def test_roi_tracker():
     """Test the ROI tracker"""

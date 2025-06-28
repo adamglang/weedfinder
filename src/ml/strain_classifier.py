@@ -1,9 +1,11 @@
 import openai
 import json
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict
 import os
-from .database import get_db_cursor, upsert_strain
+from ..models.enums import StrainType
+from ..services import StrainService, StrainEffectService
+from ..database.config import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +14,8 @@ class StrainClassifier:
     
     def __init__(self):
         self.openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        self.strain_service = StrainService()
+        self.strain_effect_service = StrainEffectService()
     
     def classify_strain(self, strain_name: str, additional_context: str = "") -> Dict:
         """Classify a single strain and return effects and attributes"""
@@ -72,50 +76,65 @@ Guidelines:
     
     def classify_and_store_strain(self, strain_name: str, additional_context: str = "") -> str:
         """Classify a strain and store it in the database"""
-        try:
-            # Check if strain already exists
-            with get_db_cursor() as cur:
-                cur.execute("SELECT id FROM strains WHERE canonical_name = %s", (strain_name,))
-                existing = cur.fetchone()
-                
-                if existing:
+        with get_session() as session:
+            try:
+                # Check if strain already exists
+                existing_strain = self.strain_service.get_by_name(session, strain_name)
+                if existing_strain:
                     logger.info(f"Strain '{strain_name}' already exists in database")
-                    return str(existing['id'])
-            
-            # Classify the strain
-            classification = self.classify_strain(strain_name, additional_context)
-            
-            # Store strain in database
-            strain_id = upsert_strain(
-                canonical_name=strain_name,
-                strain_type=classification['strain_type'],
-                effects=classification['effects']
-            )
-            
-            # Store additional attributes
-            with get_db_cursor() as cur:
-                # Store medical uses
-                for use in classification['medical_uses']:
-                    cur.execute("""
-                        INSERT INTO strain_effects (strain_id, effect, confidence)
-                        VALUES (%s, %s, %s)
-                        ON CONFLICT DO NOTHING
-                    """, (strain_id, f"medical_{use}", classification['confidence']))
+                    return str(existing_strain.id)
                 
-                # Store flavors
+                # Classify the strain
+                classification = self.classify_strain(strain_name, additional_context)
+                
+                # Map string strain type to enum
+                strain_type_map = {
+                    'indica': StrainType.INDICA,
+                    'sativa': StrainType.SATIVA,
+                    'hybrid': StrainType.HYBRID,
+                    'cbd_dominant': StrainType.CBD_DOMINANT
+                }
+                strain_type = strain_type_map.get(classification['strain_type'], StrainType.HYBRID)
+                
+                # Store strain in database using service
+                strain = self.strain_service.upsert_strain(
+                    session,
+                    canonical_name=strain_name,
+                    strain_type=strain_type
+                )
+                
+                # Store primary effects
+                for effect in classification['effects']:
+                    self.strain_effect_service.create(session, obj_in={
+                        'strain_id': strain.id,
+                        'effect': effect,
+                        'confidence': classification['confidence']
+                    })
+                
+                # Store medical uses with prefix
+                for use in classification['medical_uses']:
+                    self.strain_effect_service.create(session, obj_in={
+                        'strain_id': strain.id,
+                        'effect': f"medical_{use}",
+                        'confidence': classification['confidence']
+                    })
+                
+                # Store flavors with prefix
                 for flavor in classification['flavors']:
-                    cur.execute("""
-                        INSERT INTO strain_effects (strain_id, effect, confidence)
-                        VALUES (%s, %s, %s)
-                        ON CONFLICT DO NOTHING
-                    """, (strain_id, f"flavor_{flavor}", classification['confidence']))
-            
-            logger.info(f"Successfully classified and stored strain '{strain_name}' with ID {strain_id}")
-            return strain_id
-            
-        except Exception as e:
-            logger.error(f"Error classifying and storing strain '{strain_name}': {e}")
-            raise
+                    self.strain_effect_service.create(session, obj_in={
+                        'strain_id': strain.id,
+                        'effect': f"flavor_{flavor}",
+                        'confidence': classification['confidence']
+                    })
+                
+                session.commit()
+                logger.info(f"Successfully classified and stored strain '{strain_name}' with ID {strain.id}")
+                return str(strain.id)
+                
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error classifying and storing strain '{strain_name}': {e}")
+                raise
     
     def batch_classify_strains(self, strain_names: List[str]) -> Dict[str, str]:
         """Classify multiple strains in batch"""
@@ -134,36 +153,23 @@ Guidelines:
     
     def get_strain_effects(self, strain_id: str) -> Dict:
         """Get all effects and attributes for a strain"""
-        try:
-            with get_db_cursor() as cur:
+        with get_session() as session:
+            try:
                 # Get basic strain info
-                cur.execute("""
-                    SELECT canonical_name, strain_type 
-                    FROM strains 
-                    WHERE id = %s
-                """, (strain_id,))
-                
-                strain_info = cur.fetchone()
-                if not strain_info:
+                strain = self.strain_service.get(session, strain_id)
+                if not strain:
                     return {}
                 
-                # Get all effects
-                cur.execute("""
-                    SELECT effect, confidence 
-                    FROM strain_effects 
-                    WHERE strain_id = %s
-                    ORDER BY confidence DESC
-                """, (strain_id,))
-                
-                effects_data = cur.fetchall()
+                # Get all effects for this strain
+                strain_effects = self.strain_effect_service.find_all_by(session, strain_id=strain_id)
                 
                 # Categorize effects
                 effects = []
                 medical_uses = []
                 flavors = []
                 
-                for effect_row in effects_data:
-                    effect = effect_row['effect']
+                for effect_obj in strain_effects:
+                    effect = effect_obj.effect
                     if effect.startswith('medical_'):
                         medical_uses.append(effect.replace('medical_', ''))
                     elif effect.startswith('flavor_'):
@@ -172,58 +178,67 @@ Guidelines:
                         effects.append(effect)
                 
                 return {
-                    'name': strain_info['canonical_name'],
-                    'strain_type': strain_info['strain_type'],
+                    'name': strain.name,
+                    'strain_type': strain.strain_type.value,
                     'effects': effects,
                     'medical_uses': medical_uses,
                     'flavors': flavors
                 }
                 
-        except Exception as e:
-            logger.error(f"Error getting strain effects for {strain_id}: {e}")
-            return {}
+            except Exception as e:
+                logger.error(f"Error getting strain effects for {strain_id}: {e}")
+                return {}
     
     def update_strain_classification(self, strain_name: str, force_reclassify: bool = False) -> str:
         """Update an existing strain's classification"""
-        try:
-            with get_db_cursor() as cur:
-                cur.execute("SELECT id FROM strains WHERE canonical_name = %s", (strain_name,))
-                existing = cur.fetchone()
+        with get_session() as session:
+            try:
+                existing_strain = self.strain_service.get_by_name(session, strain_name)
                 
-                if not existing:
+                if not existing_strain:
                     # Strain doesn't exist, classify and store
                     return self.classify_and_store_strain(strain_name)
                 
-                strain_id = str(existing['id'])
+                strain_id = str(existing_strain.id)
                 
                 if force_reclassify:
                     # Delete existing effects
-                    cur.execute("DELETE FROM strain_effects WHERE strain_id = %s", (strain_id,))
+                    existing_effects = self.strain_effect_service.find_all_by(session, strain_id=existing_strain.id)
+                    for effect in existing_effects:
+                        self.strain_effect_service.delete(session, effect.id)
                     
                     # Reclassify
                     classification = self.classify_strain(strain_name)
                     
+                    # Map string strain type to enum
+                    strain_type_map = {
+                        'indica': StrainType.INDICA,
+                        'sativa': StrainType.SATIVA,
+                        'hybrid': StrainType.HYBRID,
+                        'cbd_dominant': StrainType.CBD_DOMINANT
+                    }
+                    strain_type = strain_type_map.get(classification['strain_type'], StrainType.HYBRID)
+                    
                     # Update strain type
-                    cur.execute("""
-                        UPDATE strains 
-                        SET strain_type = %s, updated_at = NOW()
-                        WHERE id = %s
-                    """, (classification['strain_type'], strain_id))
+                    self.strain_service.update(session, db_obj=existing_strain, obj_in={'strain_type': strain_type})
                     
                     # Store new effects
                     for effect in classification['effects']:
-                        cur.execute("""
-                            INSERT INTO strain_effects (strain_id, effect, confidence)
-                            VALUES (%s, %s, %s)
-                        """, (strain_id, effect, classification['confidence']))
+                        self.strain_effect_service.create(session, obj_in={
+                            'strain_id': existing_strain.id,
+                            'effect': effect,
+                            'confidence': classification['confidence']
+                        })
                     
+                    session.commit()
                     logger.info(f"Reclassified strain '{strain_name}'")
                 
                 return strain_id
                 
-        except Exception as e:
-            logger.error(f"Error updating strain classification for '{strain_name}': {e}")
-            raise
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Error updating strain classification for '{strain_name}': {e}")
+                raise
 
 def test_strain_classifier():
     """Test the strain classifier"""
