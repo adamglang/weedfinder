@@ -1,6 +1,6 @@
 # WeedFinder.ai POC
 
-AI-powered cannabis product search and recommendation platform. This POC demonstrates the core functionality with a single dispensary (Pend Oreille Cannabis Co) using POSaBIT POS integration.
+AI-powered cannabis product search and recommendation platform. This POC demonstrates the core functionality with a single dispensary using POSaBIT POS integration.
 
 ## Features
 
@@ -53,9 +53,9 @@ DATABASE_URL=postgresql://user:password@localhost:5432/weedfinder
 OPENAI_API_KEY=sk-your-openai-api-key-here
 
 # POSaBIT Store Credentials (from your conversation)
-POSABIT_FEED_ID=375112db85ccaea4
-POSABIT_MERCHANT_TOKEN=gO-sys8K_GRwlCylbRc7vA
-POSABIT_API_TOKEN=1vm1ax-tIxpocYteXD1FWA
+POSABIT_FEED_ID=
+POSABIT_MERCHANT_TOKEN=
+POSABIT_API_TOKEN=
 
 # Redis (optional)
 REDIS_URL=redis://localhost:6379
